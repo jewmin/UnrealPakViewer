@@ -431,7 +431,7 @@ static FString FormatCompressionMethod(ECompressionFlags InFlag)
 	case COMPRESS_Custom: return TEXT("Custom");
 	case COMPRESS_BiasMemory: return TEXT("BiasMemory");
 	case COMPRESS_BiasSpeed: return TEXT("BiasSpeed");
-	case COMPRESS_OverridePlatform: return TEXT("OverridePlatform");
+	// case COMPRESS_OverridePlatform: return TEXT("OverridePlatform");
 	default: return TEXT("Unknown");
 	}
 }
@@ -458,14 +458,14 @@ void SUnrealPakViewer::GenerateTreeItemsFromPAK(const FString& PAKFile)
 	delete PakHandle;
 	PakHandle = nullptr;
 
-	PakFile = MakeShareable(new FPakFile(*PAKFile, false));
-	if (!PakFile->IsValid())
+	mPakFile = MakeShareable(new FPakFile(*PAKFile, false));
+	if (!mPakFile->IsValid())
 	{
 		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("PakFileNotValidMessage", "Pak file is not valid!"));
 		return;
 	}
 
-	UE_LOG(LogUnrealPakViewer, Display, TEXT("Pak file[%s], PakInfo size[%lld]."), *PAKFile, PakFile->GetInfo().IndexSize + PakFile->GetInfo().GetSerializedSize());
+	UE_LOG(LogUnrealPakViewer, Display, TEXT("Pak file[%s], PakInfo size[%lld]."), *PAKFile, mPakFile->GetInfo().IndexSize + mPakFile->GetInfo().GetSerializedSize());
 
 	TSharedPtr<FTreeItem> VirtualRootItem = MakeShareable(new FTreeItem());
 	VirtualRootItem->DisplayName = FPaths::GetBaseFilename(PAKFile);
@@ -473,7 +473,7 @@ void SUnrealPakViewer::GenerateTreeItemsFromPAK(const FString& PAKFile)
 
 	PakFilePathTextBox->SetText(FText::FromString(FPaths::ConvertRelativePathToFull(PAKFile)));
 	TArray<FPakFile::FFileIterator> Records;
-	for (FPakFile::FFileIterator It(*PakFile); It; ++It)
+	for (FPakFile::FFileIterator It(*mPakFile); It; ++It)
 	{
 		Records.Add(It);
 	}
@@ -498,12 +498,12 @@ void SUnrealPakViewer::GenerateTreeItemsFromPAK(const FString& PAKFile)
 			Item->Size = Entry.Size;
 			Item->UncompressedSize = Entry.UncompressedSize;
 			Item->Offset = Entry.Offset;
-			Item->IsEncrypted = Entry.bEncrypted ? TEXT("true") : TEXT("false");
+			Item->IsEncrypted = Entry.IsEncrypted() ? TEXT("true") : TEXT("false");
 			Item->Hash = BytesToHex(Entry.Hash, sizeof(Entry.Hash));
-			Item->CompressionMethod = FormatCompressionMethod((ECompressionFlags)Entry.CompressionMethod);
+			Item->CompressionMethod = mPakFile->GetInfo().GetCompressionMethod(Entry.CompressionMethodIndex).ToString();
 			Item->CompressionBlockCount = Entry.CompressionBlocks.Num();
 			Item->CompressionBlockSize = Entry.CompressionBlockSize;
-			Item->SerializedSize = Entry.GetSerializedSize(PakFile->GetInfo().Version);
+			Item->SerializedSize = Entry.GetSerializedSize(mPakFile->GetInfo().Version);
 		}
 	}
 
@@ -607,7 +607,7 @@ void SUnrealPakViewer::ExecuteExtract()
 	for (const FString& File : Files)
 	{
 		const FString TrueFilePath = File.Mid(File.Find(TEXT("/")) + 1);
-		if (!PakFile->Find(FString::Printf(TEXT("%s%s"), *PakFile->GetMountPoint(), *TrueFilePath), &OutEntry))
+		if (FPakFile::EFindResult::NotFound == mPakFile->Find(FString::Printf(TEXT("%s%s"), *mPakFile->GetMountPoint(), *TrueFilePath), &OutEntry))
 		{
 			continue;
 		}
@@ -626,7 +626,7 @@ bool SUnrealPakViewer::UncompressCopyFile(FArchive& Dest, FArchive& Source, cons
 	// The compression block size depends on the bit window that the PAK file was originally created with. Since this isn't stored in the PAK file itself,
 	// we can use FCompression::CompressMemoryBound as a guideline for the max expected size to avoid unncessary reallocations, but we need to make sure
 	// that we check if the actual size is not actually greater (eg. UE-59278).
-	int32 MaxCompressionBlockSize = FCompression::CompressMemoryBound((ECompressionFlags)Entry.CompressionMethod, Entry.CompressionBlockSize);
+	int32 MaxCompressionBlockSize = FCompression::CompressMemoryBound(PakFile.GetInfo().GetCompressionMethod(Entry.CompressionMethodIndex), Entry.CompressionBlockSize);
 	for (const FPakCompressedBlock& Block : Entry.CompressionBlocks)
 	{
 		MaxCompressionBlockSize = FMath::Max<int32>(MaxCompressionBlockSize, Block.CompressedEnd - Block.CompressedStart);
@@ -646,15 +646,15 @@ bool SUnrealPakViewer::UncompressCopyFile(FArchive& Dest, FArchive& Source, cons
 		uint32 CompressedBlockSize = Entry.CompressionBlocks[BlockIndex].CompressedEnd - Entry.CompressionBlocks[BlockIndex].CompressedStart;
 		uint32 UncompressedBlockSize = (uint32)FMath::Min<int64>(Entry.UncompressedSize - Entry.CompressionBlockSize*BlockIndex, Entry.CompressionBlockSize);
 		Source.Seek(Entry.CompressionBlocks[BlockIndex].CompressedStart + (PakFile.GetInfo().HasRelativeCompressedChunkOffsets() ? Entry.Offset : 0));
-		uint32 SizeToRead = Entry.bEncrypted ? Align(CompressedBlockSize, FAES::AESBlockSize) : CompressedBlockSize;
+		uint32 SizeToRead = Entry.IsEncrypted() ? Align(CompressedBlockSize, FAES::AESBlockSize) : CompressedBlockSize;
 		Source.Serialize(PersistentBuffer, SizeToRead);
 
-		if (Entry.bEncrypted)
+		if (Entry.IsEncrypted())
 		{
 			FAES::DecryptData(PersistentBuffer, SizeToRead, Key);
 		}
 
-		if (!FCompression::UncompressMemory((ECompressionFlags)Entry.CompressionMethod, UncompressedBuffer, UncompressedBlockSize, PersistentBuffer, CompressedBlockSize))
+		if (!FCompression::UncompressMemory(PakFile.GetInfo().GetCompressionMethod(Entry.CompressionMethodIndex), UncompressedBuffer, UncompressedBlockSize, PersistentBuffer, CompressedBlockSize))
 		{
 			return false;
 		}
@@ -673,10 +673,10 @@ bool SUnrealPakViewer::BufferedCopyFile(FArchive& Dest, FArchive& Source, const 
 	{
 		const int64 SizeToCopy = FMath::Min(BufferSize, RemainingSizeToCopy);
 		// If file is encrypted so we need to account for padding
-		int64 SizeToRead = Entry.bEncrypted ? Align(SizeToCopy, FAES::AESBlockSize) : SizeToCopy;
+		int64 SizeToRead = Entry.IsEncrypted() ? Align(SizeToCopy, FAES::AESBlockSize) : SizeToCopy;
 
 		Source.Serialize(Buffer, SizeToRead);
-		if (Entry.bEncrypted)
+		if (Entry.IsEncrypted())
 		{
 			FAES::DecryptData((uint8*)Buffer, SizeToRead, Key);
 		}
@@ -688,13 +688,13 @@ bool SUnrealPakViewer::BufferedCopyFile(FArchive& Dest, FArchive& Source, const 
 
 bool SUnrealPakViewer::ExtractFileFromPak(const FPakEntry& Entry, const FString& FileInPak, const FString& DestFolder)
 {
-	if (!PakFile.IsValid() || !PakFile->IsValid())
+	if (!mPakFile.IsValid() || !mPakFile->IsValid())
 	{
 		return false;
 	}
 
 	FString DestPath(DestFolder);
-	FArchive& PakReader = *PakFile->GetSharedReader(NULL);
+	FArchive& PakReader = *mPakFile->GetSharedReader(NULL);
 	const int64 BufferSize = 8 * 1024 * 1024; // 8MB buffer for extracting
 	void* Buffer = FMemory::Malloc(BufferSize);
 	int64 CompressionBufferSize = 0;
@@ -703,10 +703,10 @@ bool SUnrealPakViewer::ExtractFileFromPak(const FPakEntry& Entry, const FString&
 
 	PakReader.Seek(Entry.Offset);
 	FPakEntry EntryInfo;
-	EntryInfo.Serialize(PakReader, PakFile->GetInfo().Version);
+	EntryInfo.Serialize(PakReader, mPakFile->GetInfo().Version);
 	if (EntryInfo == Entry)
 	{
-		if (Entry.bEncrypted && !FCoreDelegates::GetPakEncryptionKeyDelegate().IsBound())
+		if (Entry.IsEncrypted() && !FCoreDelegates::GetPakEncryptionKeyDelegate().IsBound())
 		{
 			ShowAESKeyWindow();
 		}
@@ -716,13 +716,13 @@ bool SUnrealPakViewer::ExtractFileFromPak(const FPakEntry& Entry, const FString&
 		TUniquePtr<FArchive> FileHandle(IFileManager::Get().CreateFileWriter(*DestFilename));
 		if (FileHandle)
 		{
-			if (Entry.CompressionMethod == COMPRESS_None)
+			if (Entry.CompressionMethodIndex == 0)
 			{
 				BufferedCopyFile(*FileHandle, PakReader, Entry, Buffer, BufferSize, AESKey);
 			}
 			else
 			{
-				UncompressCopyFile(*FileHandle, PakReader, Entry, PersistantCompressionBuffer, CompressionBufferSize, AESKey, *PakFile);
+				UncompressCopyFile(*FileHandle, PakReader, Entry, PersistantCompressionBuffer, CompressionBufferSize, AESKey, *mPakFile);
 			}
 
 			bResult = true;

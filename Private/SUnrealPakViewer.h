@@ -294,7 +294,7 @@ protected:
 	/** The list of folders in the tree */
 	TArray<TSharedPtr<FTreeItem>> TreeRootItems;
 
-	TSharedPtr<class FPakFile> PakFile;
+	TSharedPtr<class FPakFile> mPakFile;
 
 	FAES::FAESKey AESKey;
 };
