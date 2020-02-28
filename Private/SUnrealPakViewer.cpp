@@ -15,6 +15,7 @@
 #include "Styling/SlateBrush.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/SBoxPanel.h"
+#include "Misc/Base64.h"
 
 #define LOCTEXT_NAMESPACE "UnrealPakViewer"
 
@@ -281,31 +282,57 @@ FReply SUnrealPakViewer::OnAESKeyConfirmButtonClicked()
 		const uint32 RequiredKeyLength = sizeof(AESKey.Key);
 		bool bCheckOK = true;
 
-		// Error checking
-		if (EncryptionKeyString.Len() < RequiredKeyLength)
+		bool bOriginKey = EncryptionKeyString.StartsWith("0x");
+		if (bOriginKey)
 		{
-			UE_LOG(LogUnrealPakViewer, Error, TEXT("AES encryption key must be %d characters long"), RequiredKeyLength);
-			bCheckOK = false;
-		}
+			EncryptionKeyString = EncryptionKeyString.RightChop(2);
 
-		if (EncryptionKeyString.Len() > RequiredKeyLength)
-		{
-			UE_LOG(LogUnrealPakViewer, Warning, TEXT("AES encryption key is more than %d characters long, so will be truncated!"), RequiredKeyLength);
-			EncryptionKeyString = EncryptionKeyString.Left(RequiredKeyLength);
-		}
+			// Error checking
+			if (EncryptionKeyString.Len() < RequiredKeyLength)
+			{
+				UE_LOG(LogUnrealPakViewer, Error, TEXT("AES encryption key must be %d characters long"), RequiredKeyLength);
+				bCheckOK = false;
+			}
 
-		if (!FCString::IsPureAnsi(*EncryptionKeyString))
-		{
-			UE_LOG(LogUnrealPakViewer, Error, TEXT("AES encryption key must be a pure ANSI string!"));
-			bCheckOK = false;
-		}
+			if (EncryptionKeyString.Len() > RequiredKeyLength)
+			{
+				UE_LOG(LogUnrealPakViewer, Warning, TEXT("AES encryption key is more than %d characters long, so will be truncated!"), RequiredKeyLength);
+				EncryptionKeyString = EncryptionKeyString.Left(RequiredKeyLength);
+			}
 
-		if (bCheckOK)
+			if (!FCString::IsPureAnsi(*EncryptionKeyString))
+			{
+				UE_LOG(LogUnrealPakViewer, Error, TEXT("AES encryption key must be a pure ANSI string!"));
+				bCheckOK = false;
+			}
+
+			if (bCheckOK)
+			{
+				ANSICHAR* AsAnsi = TCHAR_TO_ANSI(*EncryptionKeyString);
+				check(TCString<ANSICHAR>::Strlen(AsAnsi) == RequiredKeyLength);
+				FMemory::Memcpy(AESKey.Key, AsAnsi, RequiredKeyLength);
+				UE_LOG(LogUnrealPakViewer, Display, TEXT("Parsed AES encryption key from window. EncryptionKeyString[%s]."), *EncryptionKeyString);
+
+				if (AESKey.IsValid())
+				{
+					FCoreDelegates::GetPakEncryptionKeyDelegate().BindLambda([this](uint8 OutKey[32]) { FMemory::Memcpy(OutKey, AESKey.Key, sizeof(AESKey.Key)); });
+				}
+			}
+		}
+		else
 		{
-			ANSICHAR* AsAnsi = TCHAR_TO_ANSI(*EncryptionKeyString);
-			check(TCString<ANSICHAR>::Strlen(AsAnsi) == RequiredKeyLength);
-			FMemory::Memcpy(AESKey.Key, AsAnsi, RequiredKeyLength);
-			UE_LOG(LogUnrealPakViewer, Display, TEXT("Parsed AES encryption key from window. EncryptionKeyString[%s]."), *EncryptionKeyString);
+			TArray<uint8> Key;
+			FBase64::Decode(EncryptionKeyString, Key);
+			check(Key.Num() == RequiredKeyLength);
+			FMemory::Memcpy(AESKey.Key, &Key[0], RequiredKeyLength);
+
+			FString KeyString;
+			KeyString = TEXT("0x");
+			for (int64 ByteIndex = 0; ByteIndex < RequiredKeyLength; ++ByteIndex)
+			{
+				KeyString += FString::Printf(TEXT("%02X"), AESKey.Key[ByteIndex]);
+			}
+			UE_LOG(LogUnrealPakViewer, Display, TEXT("Parsed AES encryption key from window. KeyString[%s]."), *KeyString);
 
 			if (AESKey.IsValid())
 			{
@@ -451,7 +478,7 @@ void SUnrealPakViewer::GenerateTreeItemsFromPAK(const FString& PAKFile)
 	}
 	PakHandle->SeekFromEnd(-45);
 	PakHandle->Read(&bEncryptedIndex, 1);
-	if (bEncryptedIndex != 0)
+	// if (bEncryptedIndex != 0)
 	{
 		ShowAESKeyWindow();
 	}
