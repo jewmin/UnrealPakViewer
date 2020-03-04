@@ -476,9 +476,11 @@ void SUnrealPakViewer::GenerateTreeItemsFromPAK(const FString& PAKFile)
 		FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("PakFileOpenFailedMessage", "Pak file can't open!"));
 		return;
 	}
-	PakHandle->SeekFromEnd(-45);
+	FPakInfo info;
+	int64 offset = info.GetSerializedSize() - sizeof(FGuid);
+	PakHandle->SeekFromEnd(-offset);
 	PakHandle->Read(&bEncryptedIndex, 1);
-	// if (bEncryptedIndex != 0)
+	if (bEncryptedIndex != 0)
 	{
 		ShowAESKeyWindow();
 	}
